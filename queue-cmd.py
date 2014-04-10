@@ -4,7 +4,7 @@
 """
 Queue shell commands
 """
-__version__ = "1.0"
+__version__ = "1.1"
 
 import getopt
 import sys
@@ -14,6 +14,8 @@ import traceback
 import logging
 import logging.handlers
 import tempfile
+import argparse
+from re import match
 
 __app__ = os.path.basename(__file__)
 __author__ = "Gus E"
@@ -32,85 +34,64 @@ script_url = 'https://raw.github.com/gesquive/queue-cmd/master/queue-cmd.py'
 LOG_FILE = '/var/log/' + os.path.splitext(__app__)[0] + '.log'
 LOG_SIZE = 1024*1024*200
 
+DEFAULT_TAIL_LINES = 24
+
 verbose = False
 debug = False
 
 logger = logging.getLogger(__app__)
 
-def usage():
-    usage = \
-"""Usage: %s [options] command
-    Queue shell commands
-Options and arguments:
-  command                           The shell command to run.
-  -t --threads <number>             The number of threads that will run
-                                        commands. (default: 1)
-  -n --queue-name <name>            The unique queue name to start/add.
-  -l --log-file <path>              The log file path.
-  -u --update                       Checks server for an update, replaces
-                                        the current version if there is a
-                                        newer version available.
-  -h --help                         Prints this message.
-  -v --verbose                      Writes all messages to console.
-
-    v%s
-""" % (__app__, __version__)
-
-    print usage
-
-
 def main():
     global verbose, debug
 
-    try:
-        opts, args = getopt.getopt(sys.argv[1:], "hvudt:n:l:", \
-        ["help", "verbose", "update", "debug",
-        "threads=", "queue-name=", "log-file="])
-    except getopt.GetoptError, err:
-        print str(err)
-        print usage()
-        sys.exit(2)
-
     verbose = False
     debug = False
-    command = None
-    threads = 1
-    queue_name = "default"
-    log_file = LOG_FILE
 
-    # Save forced arg
-    if len(args) > 0:
-        command = args[0]
-    elif len(args) > 1:
-        usage()
-        sys.exit(2)
+    parser = argparse.ArgumentParser(add_help=False,
+        description="Queue shell commands.",
+        epilog="%(__app__)s v%(__version__)s\n" % globals())
 
-    for o, a in opts:
-        if o in ("-h", "--help"):
-            # Print out help and exit
-            usage()
-            sys.exit()
-        elif o in ("-d", "--debug"):
-            debug = True
-        elif o in ("-v", "--verbose"):
-            verbose = True
-        elif o in ("-u", "--update"):
-            update(script_url)
-            sys.exit(0)
-        elif o in ("-t", "--threads"):
-            if not a.isdigit():
-                print "threads: \'%s\' must be an integer." % a
-                sys.exit(2)
-            a = int(a)
-            if a < 1:
-                print "threads: \'%s\' must be an valid value." % a
-                sys.exit(2)
-            threads = a
-        elif o in ("-n", "--queue-name"):
-            queue_name = a
-        elif o in ("-l", "--log-file"):
-            log_file = a
+    group = parser.add_argument_group("Options")
+    group.add_argument("-h", "--help", action="help",
+        help="Show this help message and exit.")
+    group.add_argument("-v", "--verbose", action="store_true", dest="verbose",
+        help="Writes all messages to console.")
+    group.add_argument("-d", "--debug", action="store_true", dest="debug",
+        help=argparse.SUPPRESS)
+    group.add_argument("-l", "--log-file", dest="log_file", default=LOG_FILE)
+    group.add_argument("-u", "--update", action="store_true", dest="update",
+        help="Checks server for an update, replaces the current version if "\
+        "there is a newer version available.")
+    group.add_argument("-V", "--version", action="version",
+                    version="%(__app__)s v%(__version__)s" % globals())
 
+    group = parser.add_argument_group("Queue Options")
+    group.add_argument("command", nargs="?", help="The shell command to run. "
+        "Required when adding a command.")
+    group.add_argument("-n", "--queue-name", dest="queue_name",
+        type=str, default="default",
+        help="The unique queue name to perform this action on.")
+
+    group = parser.add_argument_group("Status Options")
+    group.add_argument("-s", "--print-status", action="store_true",
+        dest="print_status", help="Print the status of the current queue.")
+    group.add_argument("-q", "--print-queue", action="store_true",
+        dest="print_queue", help="Print the queue of commands.")
+    group.add_argument("-o", "--print-output", dest="print_output",
+        const=-1, type=int, nargs='?', metavar="NUM_LINES",
+        help="Print the last NUM_LINES of the current command.")
+    group.add_argument("-t", "--tail-output",
+        action="store_true", dest="tail_ouput",
+        help="Tail the output of the current command.")
+
+    args = parser.parse_args()
+    verbose = args.verbose
+    debug = args.debug
+
+    if args.update:
+        update(script_url)
+
+    log_file = args.log_file
     if not os.access(os.path.dirname(log_file), os.W_OK):
         # Couldn't write to the given log file, try writing a temporary one instead
         log_file = os.path.join(tempfile.gettempdir(),
@@ -137,32 +118,102 @@ def main():
         logger.setLevel(logging.INFO)
 
     try:
+        print_mode = args.print_status or args.tail_ouput \
+        or args.print_output or args.print_queue
+        if args.print_status or args.tail_ouput or args.print_output:
+            # Then we will be entering status mode
+            # Always read the first line, get the pid file, and check to see
+            #   if we are still running
+            output_file = get_output_file(args.queue_name, "r")
+            status_line = ""
+            if output_file:
+                status_line = output_file.readline()
+            info = match(r'(\d*),([\d\.]*),(\d*),(.*)$', status_line)
+            if not info:
+                print "The command output is missing/corrupted."
+                exit(1)
+            (m_pid, ctime, c_pid, cmd) = info.groups()
+            if not pid_exists(m_pid):
+                m_pid = None
+            if not pid_exists(c_pid):
+                c_pid = None
+
+            if args.tail_ouput:
+                #TODO: We need a way of detecting when a new file has replaced
+                #   this file, and then switch to tailing that file
+                lines = follow(output_file)
+                for line in lines:
+                    sys.stdout.write(line)
+            elif args.print_status:
+                from datetime import datetime
+                if m_pid:
+                    print "Queue is running"
+                    print "queue PID:  %s" % m_pid
+                else:
+                    print "Queue is not running"
+                if c_pid:
+                    print "Command is running"
+                    print "command PID: %s" % c_pid
+                else:
+                    print "Command is not running"
+                print "start:   %s" \
+                    % datetime.fromtimestamp(float(ctime)).strftime('%Y-%m-%d %H:%M:%S')
+                print "command: '%s'" % cmd
+            elif args.print_output:
+                if args.print_output == -1:
+                    args.print_output = DEFAULT_TAIL_LINES
+                if not m_pid:
+                    print "The queue is not running. Printing last output\n"
+                output = tail(output_file, lines=args.print_output+1)
+                # Remember to skip the initial info line
+                for line in output[1:]:
+                    sys.stdout.write(line)
+            output_file.close()
+        elif args.print_queue:
+            queue_file = get_queue_file(args.queue_name)
+            if args.queue_name == "default":
+                print("Command Queue"),
+            else:
+                print "Command Queue \'%s\'" % args.queue_name,
+            line_no = 1
+            for line in queue_file:
+                print "\n%02d: %s" % (line_no, line),
+                line_no += 1
+            queue_file.close()
+            if line_no == 1:
+                print "\rQueue is empty!".ljust(len(args.queue_name)+4)
+                print ""
+        elif not args.command:
+            print "You did not specify a command to run."
+            exit(0)
+
         # First check to see if we are the master or slave
         is_master = get_lock_file()
 
+        # Check if master is running, if it is not, the start it up
         if is_master:
             logger.info("Run in mode: master")
             daemonize()
         else:
             logger.info("Run in mode: slave")
 
-        push_command(command)
-
-        # Single mode just means that we can print our output to stdout
-        single_mode = (threads == 1)
+        if args.command:
+            push_command(args.command)
 
         shell_runners = []
         complete = 0
         while is_master:
             # Then we are the main thread, start running the threads
-            cmd = get_next_command(queue_name)
+            cmd = get_next_command(args.queue_name)
             if not cmd: # Then there are no commands left to run, finish up
                 logger.info("All shell commands completed.")
                 break
-            runner = ShellRunner(cmd, print_to_stdout=single_mode)
+            runner = ShellRunner(cmd, name="default")
             shell_runners.append(runner)
             runner.start()
 
+            # Force threads to just one for now
+            threads = 1
             # Always add on one thread to account for the Main Thread
             while (threading.activeCount() >= (threads + 1)):
                 sleep(0.25)
@@ -262,12 +313,68 @@ def get_queue_file(name="default"):
             sleep(.5)
     logger.debug("Queue lock file acquired")
 
+def get_output_file(name="default", permissions="a+"):
+    output_file_path = os.path.join(tempfile.gettempdir(), \
+        os.path.splitext(__app__)[0] + '-' + name + ".out")
+    logger.debug("Acquiring output file '%s'", output_file_path)
+    output_file = None
+    try:
+        output_file = open(output_file_path, permissions)
+    except:
+        pass
+    return output_file
+
 
 def pid_exists(pid):
     """
     Returns true if pid is still running
     """
-    return os.path.exists('/proc/%d' % pid)
+    return os.path.exists('/proc/%s' % pid)
+
+def tail(f, lines=1, _buffer=4098):
+    """Tail a file and get X lines from the end"""
+    # place holder for the lines found
+    lines_found = []
+
+    # block counter will be multiplied by buffer
+    # to get the block size from the end
+    block_counter = -1
+
+    # loop until we find X lines
+    while len(lines_found) < lines:
+        try:
+            f.seek(block_counter * _buffer, os.SEEK_END)
+        except IOError:  # either file is too small, or too many lines requested
+            f.seek(0)
+            lines_found = f.readlines()
+            break
+
+        lines_found = f.readlines()
+
+        # we found enough lines, get out
+        if len(lines_found) > lines:
+            break
+
+        # decrement the block counter to get the
+        # next X bytes
+        block_counter -= 1
+
+    return lines_found[-lines:]
+
+
+import time
+def follow(f_file):
+    f_file.seek(0,2)      # Go to the end of the file
+    sleep = 0.00001
+    while True:
+        line = f_file.readline()
+        if not line:
+            time.sleep(sleep)    # Sleep briefly
+            if sleep < 1.0:
+                sleep += 0.00001
+            continue
+        sleep = 0.00001
+        yield line
 
 
 import threading
@@ -281,28 +388,31 @@ class ShellRunner(threading.Thread):
     print_to_stdout = False
     cmd_output = []
 
-    def __init__(self, cmd, cwd=None, seperate=True, stdout=subprocess.PIPE,
-        print_to_stdout=False):
+    def __init__(self, cmd, cwd=None, seperate=True, name="default"):
 
         threading.Thread.__init__(self)
         self.cmd = cmd
         self.cwd = cwd
         self.seperate = seperate
-        self.stdout = stdout
-        self.print_to_stdout = print_to_stdout
-        if print_to_stdout:
-            self.stdout = None
+        self.queue = name
 
     def run(self):
+        from time import time
+        from os import getpid
+        output_file = get_output_file(self.queue, 'w+')
         proc = subprocess.Popen(self.cmd, shell=self.seperate,
-            stdout=self.stdout, stderr=subprocess.STDOUT, cwd=self.cwd)
-        if not self.print_to_stdout:
-            for line in iter(proc.stdout.readline, ""):
-                cmd_output.append(line)
-            proc.wait()
-        else:
-            logger.debug("Running '%s' as pid=%d", self.cmd, proc.pid)
-            proc.wait()
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.cwd)
+        output_file.write("%d,%s,%d,%s\n" % (getpid(), time(),\
+            proc.pid , self.cmd))
+        output_file.flush()
+        logger.info("Daemon running '%s' as pid=%d", self.cmd, proc.pid)
+        for line in iter(proc.stdout.readline, ""):
+            output_file.write(line)
+            # print line,
+        proc.wait()
+        output_file.close()
+        logger.info("Daemon run complete with code %d.", proc.returncode)
+
 
 
 import sys
