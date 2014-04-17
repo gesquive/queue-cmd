@@ -4,7 +4,7 @@
 """
 Queue shell commands
 """
-__version__ = "1.1"
+__version__ = "1.2"
 
 import getopt
 import sys
@@ -131,7 +131,7 @@ def main():
             info = match(r'(\d*),([\d\.]*),(\d*),(.*)$', status_line)
             if not info:
                 print "The command output is missing/corrupted."
-                exit(1)
+                sys.exit(1)
             (m_pid, ctime, c_pid, cmd) = info.groups()
             if not pid_exists(m_pid):
                 m_pid = None
@@ -172,20 +172,20 @@ def main():
         elif args.print_queue:
             queue_file = get_queue_file(args.queue_name)
             if args.queue_name == "default":
-                print("Command Queue"),
+                sys.stdout.write("Command Queue")
             else:
-                print "Command Queue \'%s\'" % args.queue_name,
+                sys.stdout.write("Command Queue \'%s\'" % args.queue_name)
             line_no = 1
             for line in queue_file:
-                print "\n%02d: %s" % (line_no, line),
+                sys.stdout.write("\n%02d: %s" % (line_no, line.rstrip()))
                 line_no += 1
             queue_file.close()
             if line_no == 1:
                 print "\rQueue is empty!".ljust(len(args.queue_name)+4)
-                print ""
-        elif not args.command:
+            print ""
+        elif not args.command and not args.update:
             print "You did not specify a command to run."
-            exit(0)
+            sys.exit(0)
 
         # First check to see if we are the master or slave
         is_master = get_lock_file()
@@ -343,7 +343,7 @@ def tail(f, lines=1, _buffer=4098):
     # loop until we find X lines
     while len(lines_found) < lines:
         try:
-            f.seek(block_counter * _buffer, os.SEEK_END)
+            f.seek(block_counter * _buffer, 2) # os.SEEK_END
         except IOError:  # either file is too small, or too many lines requested
             f.seek(0)
             lines_found = f.readlines()
