@@ -4,7 +4,7 @@
 """
 Queue shell commands
 """
-__version__ = "1.2"
+__version__ = "1.3"
 
 import getopt
 import sys
@@ -90,6 +90,7 @@ def main():
 
     if args.update:
         update(script_url)
+        sys.exit()
 
     log_file = args.log_file
     if not os.access(os.path.dirname(log_file), os.W_OK):
